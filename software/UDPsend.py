@@ -6,6 +6,7 @@ import socket
 UDP_IP =  "localhost" # "127.0.0.1" 
 UDP_PORT = 8284
 MESSAGE = "Hello, World!" # use b"Hello, World!" to encode as bytes type, or .encode() as needed
+MESSAGE = "B-200\n"
 
 print("UDP target IP: %s" % UDP_IP)
 print("UDP target port: %s" % UDP_PORT)

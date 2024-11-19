@@ -7,9 +7,9 @@
 */
 
 // #define ENCODER_USE_INTERRUPTS
-#include <Encoder.h>        // Teensy encoder library Examples-->Teensy-->Encoder
-#include "Adafruit_HX711.h" // Library Manager-->serach HX711 Adafruit --> intall
-#include <Servo.h>    // Default Arduino servo library, only needed for UNMODIFIED servos
+#include <Encoder.h>         // Teensy encoder library Examples-->Teensy-->Encoder
+#include "Adafruit_HX711.h"  // Library Manager-->serach HX711 Adafruit --> intall
+#include <Servo.h>           // Default Arduino servo library, only needed for UNMODIFIED servos
 // note: Servo.h defines refresh rate of the pulse driving the servo position.  It's only 50Hz by default
 // to speed it up change #define REFRESH_INTERVAL    20000     // minumim time to refresh servos in microseconds
 // to something like 10000 (100Hz instead of 50Hz)  or whatever max your servo can take.
@@ -18,15 +18,17 @@
 #include "HapticTelegraphPinsEtc.h"    // a literal copy-and-paste by the pre-processor (# commands)
                                        // tweak your pins, calibration vals, etc. in this .h file.
 unsigned long int printPeriod = 50;    // printing update rate in ms, use ~50 for Serial Plotter
-                                       
-bool bTeleoperatingOverSerial = false; // false: dumps *all* diagnostic sensor/command vals to serial
-                                       // true: suppresses diagnostic dump, sends /only* actuator A commands to
-                                       //   serial (for processing in python or teleoperation over internet)
-                                       //   and receives B commands from serial which drive local actuator B
+bool bPrintAllValues = true;           // prints all internal diagnostics values to serial if true
+bool bTeleoperatingOverSerial = false; // true: sends cmdB to serial receives B commands from serial
+                                       // which drive local actuator B (overites: cmdB = cmbBremote)
 
-// if bTeleoperationOverSerial==true, sends cmdA over serial to drive (command) distant actuatorB, 
-// receives cmdB to drive local actuatorB; use python script to handle serial comm and UDP/IP traffic
-float handleSerialTeleoperation(float cmdA, float cmdB);  // definition at bottom
+// Handles incoming serial input.  When EOL-terminated strings come in, does the following:
+//  'P'  -- toggles Printing out of all diagnostic data (bPrintAllValues)
+//  'T'  -- toggles Teleoperation; (bTeleoperatingOverSerial)
+//  B##.#-- writes ##.# to cmdBremote; when teleoperation is toggled on, cmdBrenite overwrites cmdB, 
+//                  driving actuator B locally with the remote command.
+//  Anything else -- returns an error
+float handleSerial(float cmdA, float cmdB);  // definition at bottom
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //   SETUP  Code in this function only runs once; initialize stuff, default values
@@ -35,11 +37,16 @@ void setup() {
 
   // put your setup code here, to run once:
   // pinMode(MotorEnablePin, INPUT); //not used by default, 3.3 vs 5V tolerant
-  pinMode(LedPin, OUTPUT);      digitalWrite(LedPin, HIGH);  // LED on means power is on  
-  pinMode(MotorA1pin, OUTPUT);  pinMode(MotorA2pin, OUTPUT);
-  pinMode(MotorB1pin, OUTPUT);  pinMode(MotorB2pin, OUTPUT);
-  analogWriteFrequency(MotorA1pin, PwmFrequency); analogWriteFrequency(MotorA2pin, PwmFrequency);
-  analogWriteFrequency(MotorB1pin, PwmFrequency); analogWriteFrequency(MotorA2pin, PwmFrequency);
+  pinMode(LedPin, OUTPUT);
+  digitalWrite(LedPin, HIGH);  // LED on means power is on
+  pinMode(MotorA1pin, OUTPUT);
+  pinMode(MotorA2pin, OUTPUT);
+  pinMode(MotorB1pin, OUTPUT);
+  pinMode(MotorB2pin, OUTPUT);
+  analogWriteFrequency(MotorA1pin, PwmFrequency);
+  analogWriteFrequency(MotorA2pin, PwmFrequency);
+  analogWriteFrequency(MotorB1pin, PwmFrequency);
+  analogWriteFrequency(MotorA2pin, PwmFrequency);
   analogWriteResolution(PwmResolution);  // analogWrite value 0 to 4095, or 4096 for high
 
   // turn motors off, etc.
@@ -64,17 +71,24 @@ void setup() {
   encoderB.write(0);
 
   // if (unmodified) servos are used, initialize them here ...
-  servoA.attach(ServoDrivePinA);  servoA.write(ServoInitialPosA);
-  servoB.attach(ServoDrivePinB);  servoB.write(ServoInitialPosB);
+  servoA.attach(ServoDrivePinA);
+  servoA.write(ServoInitialPosA);
+  servoB.attach(ServoDrivePinB);
+  servoB.write(ServoInitialPosB);
   // move servos to confirm operation and sign (motion direction should be both up)
   delay(250);
-  servoA.write(ServoInitialPosA - 10); servoB.write(ServoInitialPosB + 10);
+  servoA.write(ServoInitialPosA - 10);
+  servoB.write(ServoInitialPosB + 10);
   delay(250);
-  servoA.write(ServoInitialPosA); servoB.write(ServoInitialPosB);
-  
+  servoA.write(ServoInitialPosA);
+  servoB.write(ServoInitialPosB);
+
   // run serial at 115200 or greater; will need to interact over serial with decent latency
   Serial.begin(115200);
   Serial.println("Haptic Telegraph is running...");
+  Serial.println("Press P<enter> to toggle printing of all diagnostic data.");
+  Serial.println("Type  B12.3 to set HapticTelegraph cmdB to 12.3 to drive actuator B.");
+
 }
 
 
@@ -85,12 +99,13 @@ void setup() {
 int cmdPWM = 0, delta = 1;
 unsigned long t0, tPrint = 0;  // timestamps
 float forceA, forceB, posA, posB;
-float cmdA, cmdB, errA = 0, errB = 0;
+float cmdA, cmdB, cmdBremote, errA = 0, errB = 0;
+const float degToMicroseconds = 2000.0/180.0;
 void loop() {
 
   t0 = millis();
 
-  // Read forces; for blocking call, will take 1/80Hz (~13ms)each; for nonblocking, returns immediately 
+  // Read forces; for blocking call, will take 1/80Hz (~13ms)each; for nonblocking, returns immediately
   // // BLOCKING:
   forceA = getLoadA();
   forceB = getLoadB();
@@ -107,49 +122,57 @@ void loop() {
   posB = servoB.read();  // UNMODIFIED SERVO
 
   // read position via encoder (if installed, e.g. N20)
-  posA = encoderA.read();
-  posB = encoderB.read();
+  // posA = encoderA.read();
+  // posB = encoderB.read();
 
   ////////////////////////////////////////////////////////////////////
   // Print all values for serial plotter:
   // after printPeriod ms since the last print, go ahead and print...
-  if ( millis() - tPrint >= printPeriod   &&   !bTeleoperatingOverSerial ) {
-    Serial.print(" ForceA:");    Serial.print(forceA);    
-    Serial.print(" ForceB:");    Serial.print(forceB);
-    
+  if (bPrintAllValues && millis() - tPrint >= printPeriod) {
+    Serial.print(" ForceA:");
+    Serial.print(forceA);
+    Serial.print(" ForceB:");
+    Serial.print(forceB);
+
     // Modified or unmodified servo pos.
-    Serial.print("   ServoPosA:"); Serial.print(posA);
-    Serial.print(  " ServoPosB:"); Serial.print(posB);
-    
+    Serial.print("   ServoPosA:");
+    Serial.print(posA);
+    Serial.print(" ServoPosB:");
+    Serial.print(posB);
+
     // // N20 encoder position in deg, if encoders are unconnected, will just read 0.
-    // Serial.print("  EncA:");  Serial.print(encoderA.read() * EncCountsToDeg);    
+    // Serial.print("  EncA:");  Serial.print(encoderA.read() * EncCountsToDeg);
     // Serial.print(" EncB:" );  Serial.print(encoderB.read() * EncCountsToDeg);
-    
+
     // // H-Bridge DC motor command
     // Serial.print("  cmdPWM:");  Serial.print(cmdPWM);
     // Serial.print(" MaxPWM:"+String(MaxPWM)); Serial.print(", ");
 
     // final commands to be sent to actuator A and B (inputs to plant)
-    Serial.print("   cmdA:"); Serial.print(cmdA);
-    Serial.print(  " cmdB:"); Serial.print(cmdB);    
+    Serial.print("   cmdA:");
+    Serial.print(cmdA);
+    Serial.print(" cmdB:");
+    Serial.print(cmdB);
 
-    Serial.print("  deltaT[ms]:"); Serial.print(millis() - t0);
+    Serial.print("  deltaT[ms]:");
+    Serial.print(millis() - t0);
     tPrint = millis();
     Serial.println("");  //Serial.flush();
   }
 
+
   /////////////////////////////////////////////////////////////////////
   // UNMODIFIED servo and force control (note, servos opposite signs)
-  // 
+  //
   // // single actuator force control (e.g control force error to zero)
-  int targetForce = 0;     // grams
+  int targetForce = 0;  // grams
   // computer error to regulate:  could be force, position, impedance...
-  errA = targetForce - forceA;  
-  errB = targetForce - forceB;  
-  
+  errA = targetForce - forceA;
+  errB = targetForce - forceB;
+
   // simple proportional control about setpoint, rejecting error disturbance
-  cmdA = -( 0.0  )*errA  + 90;   // a virtual spring about the 90 deg origin
-  cmdB =  (1/5.0)*errB   + 90;   // a virtual spring about the 90 deg origin
+  cmdA = -(0.0) * errA + 90;  // a virtual spring about the 90 deg origin
+  //cmdB =  (1/5.0)*errB   + 90;   // a virtual spring about the 90 deg origin
   // OBSERVE: *gently,slowly* pushing on A-> high reaction force, B->low
 
   ///////////////////////////////////////////////////////////////////////
@@ -157,72 +180,78 @@ void loop() {
   // ***  LOCAL TELEOPERATION (on same telegraph between A and B)  ***
   //
   ///////////////////////////////////////////////////////////////////////
-  
+
   /////////////////////////////////////////////////////////
   // * Unidirectional A to B, no feedback from B to A *  //
 
   // // (i) Make an open loop dial gauge: B position displays force on A:
   // // observe: finger force on A causes sensisitve dial-like motion at B
-  // // even if touching the "floor", easy to crush soft object; 
+  // // even if touching the "floor", easy to crush soft object;
   // // unmodified servo has a proportaionl controller (very stiff spring)
   // // observe: hold down base lid above usb port, tilting on short edge
   // //       once it touches floor, physically linked, A "kicks back"
-  // // observe: hold down base lid near servoA, tilting along long edge, 
+  // // observe: hold down base lid near servoA, tilting along long edge,
   // //       once it touches floor, physically linked,  A "flees" from finger
   // cmdA =  90;                  // locally regulate A to constant position
   // cmdB = -forceA / 5.0 + 90;   // teleoperating forceA to position B
-  
-  // (ii) Make A a virtual (local) spring, to get a position deflection; can 
-  // be used as an input device; position of A maps to position of B  
+
+  // (ii) Make A a virtual (local) spring, to get a position deflection; can
+  // be used as an input device; position of A maps to position of B
   // observe: force on A moves both A and B; touching B does nothing to A
-  // observe: touching floor at B is more stable, still easily crushes soft object at B  
+  // observe: touching floor at B is more stable, still easily crushes soft object at B
   // cmdA =  forceA / 50.0 + 90;  // a local spring at A
   // cmdB = -forceA / 50.0 + 90;  // transmit force to B
-  
+
   // (iii) B mirrors A position but w/ a (different) virtual spring implemented locally at B too
-  // observe: move "spring" A with your finger, B should copy motion of A; 
+  // observe: move "spring" A with your finger, B should copy motion of A;
   // observe: move spring B with finger, deflects like spring but no motion at A
-  // observe: touch soft object with B using A; should be more genle, 
+  // observe: touch soft object with B using A; should be more genle,
   //    like touching  with remote spring at B  (very rudimentary impedance/admitance control)
   // may need to increase denominator scale to lessen effect of forces to stabilize system
   // cmdA =  forceA / 50.0 + 90;  // a local spring at A to transmit a position command to B
-  // cmdB = -forceA / 50.0 + 90 - forceB / 50.0; // cmdA minus B "spring" forces 
+  // cmdB = -forceA / 50.0 + 90 - forceB / 50.0; // cmdA minus B "spring" forces
 
   //////////////////////////////////////////////////////////////////////////////////////
   // * Bidriectional, A and B exchange signals (only forces for unmodified servo )  * //
-  
-  // (iv) bilateral force causality: force A to pos B, force of B to pos A 
+
+  // (iv) bilateral force causality: force A to pos B, force of B to pos A
   // observe: move paddle A; locally like a stiff spring bc of unmodified servo position P-control
   //          B should move more than A, like the force dial gauge again, but less sensitive here.
-  //          Now if you move B, it should likewise move A.  This is like *bilateral* force-causality    
+  //          Now if you move B, it should likewise move A.  This is like *bilateral* force-causality
   //          haptics (though we are faking it bc we can't command motor torque, only servo pos)
-  // observe: try to crush a soft object with A, should feel a kickback force and pos on A upon touch 
-  //          compare with touching the rigid floor and trying to go through it. 
+  // observe: try to crush a soft object with A, should feel a kickback force and pos on A upon touch
+  //          compare with touching the rigid floor and trying to go through it.
   // TIP:  tilt the base so actuator B just touches target, then apply force to A
   // cmdA =  forceB / 50.0 + 90;  // teleoperating forceB to positionA
   // cmdB = -forceA / 50.0 + 90;  // teleoperating forceA to positionB
-  
+
   /////////////////////////////////////////////////////////////////////////////////////
-  // 
+  //
   // ***  REMOTE TELEOPERATION  (over python serial link, localhost or remote IP) ***
   //
   /////////////////////////////////////////////////////////////////////////////////////
-  // send commands from A over serial; consume commands from B over serial
-  
-  // sends cmdA over serial to drive distant actuatorB, 
-  // receives cmdB to drive local actuatorB
-  if (bTeleoperatingOverSerial) 
-    cmdB = handleSerialTeleoperation(cmdA, cmdB);
-  // // for local virtual spring at B *and* remote command add:
-  //cmdB = cmdB - forceB / 50.0;
-     
-  
+  // send motion commands from A over serial; consume commands from B over serial
+
+  // sends cmdB over serial to drive distant actuatorB,
+  // receives remcmdB to drive local actuatorB from cmdBremote
+  if (bTeleoperatingOverSerial) {
+    
+    // write local cmdB to serial to run distant actuatorB;   FORMAT: "B#.##x\n" aka 'B'<float>'\n'
+    Serial.print("B"); Serial.println(cmdB); // sends cmbB to distant location
+    // overwrite local cmdB with any commands that have been received externally (over serial)
+    cmdB = cmdBremote;     
+  }
+  // //Note: to render local virtual spring at B about  remote command add:
+  // cmdB = cmdBremote - forceB / 50.0;  // rudimentary impedance control 
+
   // command servos to their position
-  servoA.write(cmdA);
-  servoB.write(cmdB);
+  //servoA.write(cmdA); // only integer values between 0 and 180 (lower resolution)
+  //servoB.write(cmdB);  
+  servoA.writeMicroseconds(1000.0 + cmdA * degToMicroseconds);  // 1000->0 deg; 2000->180 deg
+  servoB.writeMicroseconds(1000.0 + cmdB * degToMicroseconds);
 
   // // Introduce time delay or reduction in sampling rate to explore destabilization effects...
-  //delay(250);
+  delay(1); //delay(250);
 
   /////////////////////////////////////////////////////////////////
   // H Bridge and position sensing-based control schemes ...
@@ -239,26 +268,42 @@ void loop() {
 
   // // Force control; 100g
   // cmdPWM = -(loadCellA.get_units()-100) * 20;
-
-
+  handleSerial();
 }
 
 
-// full definition of serial handling; A# B#
-float handleSerialTeleoperation(float cmdA, float cmdB){
-  
-  // write cmdA to remote actuatorB;   FORMAT: "A#.##x\n" aka 'A'<float>'\n'
-  Serial.print("A"); Serial.println(cmdA);
-  
-  // parse cmdB from remote sender and update, leave cmdB unchanged otherwise
-  // incoming command expected FORMAT:  "B#.##\n"
-  while ( Serial.available() ){
-    if(Serial.read() == 'B')
-      cmdB = Serial.parseFloat();
-    else 
-      Serial.println("ERROR: Failed To Parse B##.##") ;
+// full definition of serial handling; B##.# P T
+void handleSerial() {
+
+  // parse info from remote sender and update, overwirte cmdB if it comes in
+  // incoming command expected FORMAT:  "B#.##\n" or "P\n" 
+  // parse any other serial commands here. 
+  while (Serial.available()) {
+
+    String s = Serial.readStringUntil('\n');
+
+    // based on the first character, interperet the rest of the string
+    switch (s[0]) {
+      
+      // cmdB // B124.5 is a float for cmdB, to drive actuator B
+      case 'B':   
+        cmdBremote = s.substring(1).toFloat();
+        //Serial.println("#Extracted Float:" + String(cmdB));
+        break;
+      
+      // toggle bPrintAllValues to print all data or not
+      case 'P':   
+        bPrintAllValues = !bPrintAllValues; // toggle
+        break;
+
+      // toggle Teleoperation bTeleoperatingOverSerial
+      case 'T':   
+        bTeleoperatingOverSerial = !bTeleoperatingOverSerial; // toggle        
+        break;
+
+      default:
+         Serial.println("#ERROR: Failed To Parse B##.##");
+    }         
   }
-
-  return cmdB;
+  return ;
 }
-  

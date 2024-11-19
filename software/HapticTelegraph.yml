@@ -1,0 +1,17 @@
+name: HapticTelegraph
+channels:
+- conda-forge
+dependencies:
+- python=3.10
+- numpy
+- matplotlib
+- pandas
+- opencv=4.9.0
+- pyserial
+- keyboard
+# for running on MechE UR5 robots...
+#- minimalmodbus
+#- pip
+#- pip:
+#  - robodk
+#  - "tensorflow<2.11"
