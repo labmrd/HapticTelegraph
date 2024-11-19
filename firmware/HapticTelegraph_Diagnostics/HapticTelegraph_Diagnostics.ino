@@ -70,7 +70,7 @@ void setup() {
   encoderA.write(0);
   encoderB.write(0);
 
-  // if (unmodified) servos are used, initialize them here ...
+  // if (unmodified) servos are used, initialize them here ...  
   servoA.attach(ServoDrivePinA);
   servoA.write(ServoInitialPosA);
   servoB.attach(ServoDrivePinB);
@@ -82,13 +82,33 @@ void setup() {
   delay(250);
   servoA.write(ServoInitialPosA);
   servoB.write(ServoInitialPosB);
+  // int i;
+  // while(1){
 
+  
+  // if (Serial.available()){    
+  //   i = Serial.parseInt();
+  //   if (i==-1){
+  //     servoA.write(0); delay(1000);    
+  //     Serial.print("write(o)");
+  //   }else if (i>1){
+  //     Serial.println("Writing" + String(i));
+  //     servoA.writeMicroseconds(i);
+  //   }
+  // }
+  // i=0;
+    
+  //servoA.writeMicroseconds(700); delay(500);
+  //servoA.write(90); delay(1000);  
+  //servoA.writeMicroseconds(1500); delay(500);
+  //servoA.write(180); delay(1000);
+  //}
+  
   // run serial at 115200 or greater; will need to interact over serial with decent latency
   Serial.begin(115200);
   Serial.println("Haptic Telegraph is running...");
-  Serial.println("Press P<enter> to toggle printing of all diagnostic data.");
-  Serial.println("Type  B12.3 to set HapticTelegraph cmdB to 12.3 to drive actuator B.");
-
+  Serial.println("Press 'P<enter>' to toggle printing of all diagnostic data.");
+  Serial.println("Type  'B12.3' to set HapticTelegraph cmdB to 12.3 to drive actuator B.");
 }
 
 
@@ -100,7 +120,7 @@ int cmdPWM = 0, delta = 1;
 unsigned long t0, tPrint = 0;  // timestamps
 float forceA, forceB, posA, posB;
 float cmdA, cmdB, cmdBremote, errA = 0, errB = 0;
-const float degToMicroseconds = 2000.0/180.0;
+const float degToMicroseconds = (2000.0)/180.0;  //HS 422 hs 500us at 0deg, 2500us at 180deg
 void loop() {
 
   t0 = millis();
@@ -172,7 +192,7 @@ void loop() {
 
   // simple proportional control about setpoint, rejecting error disturbance
   cmdA = -(0.0) * errA + 90;  // a virtual spring about the 90 deg origin
-  //cmdB =  (1/5.0)*errB   + 90;   // a virtual spring about the 90 deg origin
+  cmdB =  (1/5.0)*errB + 90;  // a virtual spring about the 90 deg origin
   // OBSERVE: *gently,slowly* pushing on A-> high reaction force, B->low
 
   ///////////////////////////////////////////////////////////////////////
@@ -247,8 +267,8 @@ void loop() {
   // command servos to their position
   //servoA.write(cmdA); // only integer values between 0 and 180 (lower resolution)
   //servoB.write(cmdB);  
-  servoA.writeMicroseconds(1000.0 + cmdA * degToMicroseconds);  // 1000->0 deg; 2000->180 deg
-  servoB.writeMicroseconds(1000.0 + cmdB * degToMicroseconds);
+  servoA.writeMicroseconds(500.0 + cmdA * degToMicroseconds);  // 1000->0 deg; 2000->180 deg
+  servoB.writeMicroseconds(500.0 + cmdB * degToMicroseconds);
 
   // // Introduce time delay or reduction in sampling rate to explore destabilization effects...
   delay(1); //delay(250);
